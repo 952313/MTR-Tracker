@@ -86,6 +86,7 @@ TCL = {
     "LAK": ["Lai King", "荔景", "荔景"],
     "TSY": ["Tsing Yi", "青衣", "青衣"],
     "SUN": ["Sunny Bay", "欣澳", "欣澳"],
+#   "TCW": ["Tung Chung West", "東涌西", "东涌西"],  # This station is planned but not yet operational
     "TUC": ["Tung Chung", "東涌", "东涌"]
 }
 
