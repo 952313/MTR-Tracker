@@ -86,12 +86,11 @@ def twl_status():
         "data": state_data
     })
 
+    
+print("🚀 港铁实时监控后台轮询线程初始化...")
+t = threading.Thread(target=background_api_worker, daemon=True)
+t.start()
+
 if __name__ == '__main__':
     DEBUG = True  # 调试开关
-    print("🚀 港铁实时监控网页端已启动: http://127.0.0.1:5000")
-    print("💡 智能防 429 机制已生效：阈值 10 秒，未访问网页时自动停止访问 NextTrainAPI。")
-    
-    t = threading.Thread(target=background_api_worker, daemon=True)
-    t.start()
-    
     app.run(debug=False, port=5000)
