@@ -1,160 +1,379 @@
-import json
+# ==============================================================================
+# core.py (完整整合版)
+# ==============================================================================
 import time
-from data import MTR_NETWORK
+import os
+import json
+from data import MTR_NETWORK, TWL_PLATFORMS
 
-# 内部调试开关
-DEBUG_CORE = True
-debug = lambda x: print(x) if DEBUG_CORE else None
+# 🔴 全局调试开关：设为 False 时不累加轮次、不写 debug.txt
+DEBUG = False
 
-transit_records = {}
-tracked_trains = []
+# ANSI 颜色定义
+RED = "\033[91m"
+BLUE = "\033[94m"
+GREEN = "\033[92m"
+RESET = "\033[0m"
+
+# 全局内存中的在途列车队列、快照与轮次计数器
+segment_queues = {}
 last_arrived_snapshot = {}
+error_history = []
+loop_round = 0  # 全局轮次计数器 n
 
-
-def get_station_name(line: str, sta_code: str) -> str:
-    """获取车站的繁体中文名称，找不到则返回代码本身"""
-    try:
-        return MTR_NETWORK[line][sta_code][1]
-    except KeyError:
-        return sta_code
-
+def get_twl_stations():
+    """从 data.py 动态获取荃湾线 (TWL) 的所有车站代码"""
+    if "TWL" not in MTR_NETWORK:
+        return []
+    return list(MTR_NETWORK["TWL"].keys())
 
 def get_next_station(line: str, dir_key: str, current_sta: str) -> str:
     """根据 MTR_NETWORK 中定义的车站顺序获取下一站代码"""
-    if line not in MTR_NETWORK:
+    stations = get_twl_stations()
+    if line not in MTR_NETWORK or current_sta not in stations:
         return None
-    
-    stations = list(MTR_NETWORK[line].keys())
-    if current_sta not in stations:
-        return None
-        
     idx = stations.index(current_sta)
-    
-    if dir_key == "UP":
-        if idx + 1 < len(stations):
-            return stations[idx + 1]
-    elif dir_key == "DOWN":
-        if idx - 1 >= 0:
-            return stations[idx - 1]
-            
+    if dir_key == "UP" and idx - 1 >= 0:
+        return stations[idx - 1]
+    elif dir_key == "DOWN" and idx + 1 < len(stations):
+        return stations[idx + 1]
     return None
 
-
-def save_results_to_txt():
-    """计算已记录的所有样本平均耗时，并将 JSON 结构写入 result.txt"""
-    formatted_output = {}
+def get_twl_direction(current_sta: str, dest: str) -> str:
+    """
+    核心动态判定函数：根据当前车站和终点站在线路中的索引，
+    计算列车实际行驶方向 ('UP' 或 'DOWN')。
+    """
+    stations = get_twl_stations()
+    if current_sta not in stations or dest not in stations:
+        return "DOWN"
     
-    for line, dirs in transit_records.items():
-        formatted_output[line] = {"UP": {}, "DOWN": {}}
-        for dir_key, segments in dirs.items():
-            for seg_key, times in segments.items():
-                if times:
-                    avg_seconds = round(sum(times) / len(times))
-                    formatted_output[line][dir_key][seg_key] = {
-                        "avg_seconds": avg_seconds,
-                        "samples": len(times),
-                        "raw_history": times
-                    }
-                    
-    try:
-        with open("result.txt", "w", encoding="utf-8") as f:
-            json.dump(formatted_output, f, indent=2, ensure_ascii=False)
-        debug("💾 [测绘保存] 数据已成功更新并写入 result.txt")
-    except Exception as e:
-        debug(f"❌ [测绘保存] 写入 result.txt 失败: {e}")
+    curr_idx = stations.index(current_sta)
+    dest_idx = stations.index(dest)
+    
+    if curr_idx < dest_idx:
+        return "DOWN"
+    elif curr_idx > dest_idx:
+        return "UP"
+    else:
+        return "DOWN" if current_sta == "CEN" else "UP" if current_sta == "TSW" else "DOWN"
 
+def get_platforms(sta_code: str, dir_key: str) -> list:
+    """获取指定方向和车站的配置月台。"""
+    return TWL_PLATFORMS.get(dir_key, {}).get(sta_code, [])
+
+def get_train_platform(sta_code: str, dir_key: str, train: dict) -> list:
+    """获取列车实际占用的月台，避免 CEN 缺少月台时占用两边。"""
+    configured_plats = get_platforms(sta_code, dir_key)
+    actual_plat = str(train.get("plat", ""))
+    if sta_code == "CEN":
+        if actual_plat in ("1", "2"):
+            return [actual_plat]
+        return ["1"] if dir_key == "UP" else ["2"]
+    return configured_plats
+
+def dump_debug_log(trains_data, conflict_details):
+    """
+    将冲突现场及未被任何解析污染的源 json 写入 debug.txt (a+ 模式)
+    """
+    curr_time_str = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())
+    try:
+        with open("debug.txt", "a", encoding="utf-8") as f:
+            f.write("="*80 + "\n")
+            f.write(f"[DEBUG LOG] 时间戳: {curr_time_str} | 轮次 n={loop_round} | 时间戳整数: {int(time.time())}\n")
+            f.write("--- 发现冲突: 车站与相邻路轨同时占用 ---\n")
+            for detail in conflict_details:
+                f.write(f"  * {detail}\n")
+            f.write("--- 源 JSON (RAW API DATA) ---\n")
+            f.write(json.dumps(trains_data, ensure_ascii=False, indent=2) + "\n")
+            f.write("="*80 + "\n\n")
+    except Exception as e:
+        print(f"写入 debug.txt 失败: {e}")
+
+def calc_twl_state(trains_data):
+    """
+    第一部分：计算核心逻辑
+    处理离站检测、在途队列、进站匹配、过海校验，并返回整理好的状态数据
+    """
+    global last_arrived_snapshot, segment_queues, error_history, loop_round
+    
+    # 只有开启 DEBUG 时才累加轮次，防止无限运行导致整数溢出
+    if DEBUG:
+        loop_round += 1  
+        
+    current_time = time.time()
+    twl_stations = get_twl_stations()
+    if not twl_stations:
+        return {}
+
+    lines = trains_data.get("lines", {})
+    twl_info = lines.get("TWL", trains_data)
+    stations_data = twl_info.get("stations", {})
+
+    for sta_code, sta_info in stations_data.items():
+        if isinstance(sta_info, dict) and sta_info.get("success") is False:
+            error = f"{sta_code}: {sta_info.get('message', 'API error')}"
+            if error not in error_history:
+                error_history.append(error)
+    
+    current_arrived_snapshot = {}
+    valid_stations = {
+        sta_code
+        for sta_code in twl_stations
+        if isinstance(stations_data.get(sta_code), dict)
+        and "UP" in stations_data[sta_code]
+        and "DOWN" in stations_data[sta_code]
+    }
+    
+    arrived_status = {
+        sta: {"UP": False, "DOWN": False, "plats": set(), "green_plats": set()}
+        for sta in twl_stations
+    }
+    
+    # 1. 收集当前停靠状态（剔除会漂移的 api.time 字段，采用稳定的复合 Key）
+    for sta_code in twl_stations:
+        sta_info = stations_data.get(sta_code, {})
+        plats_arrived = set()
+        arrived_trains = {"UP": [], "DOWN": []}
+        
+        for api_dir_key in ["UP", "DOWN"]:
+            train_list = sta_info.get(api_dir_key, [])
+            for t in train_list:
+                ttnt = t.get("ttnt", 99)
+                is_arr = (ttnt <= 5) if sta_code == "CEN" else (ttnt == 0)
+                
+                if is_arr:
+                    dest = t.get("dest", "UNKNOWN")
+                    real_dir = get_twl_direction(sta_code, dest)
+                    
+                    arrived_status[sta_code][real_dir] = True
+                    configured_plats = get_train_platform(sta_code, real_dir, t)
+                    plats_arrived.update(configured_plats)
+                    
+                    if dest not in ("CEN", "TSW"):
+                        arrived_status[sta_code]["green_plats"].update(configured_plats)
+                        
+                    arrived_trains[real_dir].append(dest)
+                    
+                    # 💡 核心修复：移除 t.get("time", "")，防止时间漂移引发误判离站
+                    snapshot_key = (
+                        "TWL", real_dir, sta_code, dest,
+                        str(t.get("plat", ""))
+                    )
+                    current_arrived_snapshot[snapshot_key] = current_time
+                    
+        arrived_status[sta_code]["plats"] = plats_arrived
+        arrived_status[sta_code]["arrived_trains"] = arrived_trains
+
+    # 2. 离站检测
+    for old_key, _ in last_arrived_snapshot.items():
+        if old_key[2] not in valid_stations:
+            current_arrived_snapshot[old_key] = _
+            continue
+        if old_key not in current_arrived_snapshot:
+            line_code, _, sta_code, dest = old_key[:4]
+            
+            departure_dir = get_twl_direction(sta_code, dest)
+            next_sta = get_next_station(line_code, departure_dir, sta_code)
+            
+            if next_sta:
+                seg_key = f"{line_code}-{departure_dir}-{sta_code}->{next_sta}"
+                
+                if sta_code == "TWH" and next_sta == "TSW":
+                    continue
+
+                if seg_key not in segment_queues:
+                    segment_queues[seg_key] = []
+                
+                segment_queues[seg_key].append({
+                    "depart_time": current_time,
+                    "depart_time_str": time.strftime('%H:%M:%S', time.localtime(current_time)),
+                    "depart_round": loop_round,
+                    "dest": dest,
+                    "plat": old_key[4]
+                })
+
+    # 3. 进站匹配与过海段校验 (>120秒)
+    for sta_code in twl_stations:
+        for dir_key in ["UP", "DOWN"]:
+            for dest in arrived_status[sta_code]["arrived_trains"][dir_key]:
+                train_dir = get_twl_direction(sta_code, dest)
+                stations_list = twl_stations
+                idx = stations_list.index(sta_code)
+                prev_sta = None
+                
+                if train_dir == "DOWN" and idx - 1 >= 0:
+                    prev_sta = stations_list[idx - 1]
+                elif train_dir == "UP" and idx + 1 < len(stations_list):
+                    prev_sta = stations_list[idx + 1]
+                
+                if prev_sta:
+                    seg_key = f"TWL-{train_dir}-{prev_sta}->{sta_code}"
+                    if seg_key in segment_queues and segment_queues[seg_key]:
+                        is_cross_harbor = seg_key.endswith("TST->ADM") or seg_key.endswith("ADM->TST")
+                        matching_index = next(
+                            (index for index, train in enumerate(segment_queues[seg_key])
+                             if train["dest"] == dest),
+                            None
+                        )
+                        if matching_index is None:
+                            matching_index = 0
+                        
+                        matching_train = segment_queues[seg_key][matching_index]
+                        elapsed = current_time - matching_train["depart_time"]
+                        if not (is_cross_harbor and elapsed < 120):
+                            segment_queues[seg_key].pop(matching_index)
+
+    # 4. 队列垃圾清理 (10分钟超时)
+    for seg_key in list(segment_queues.keys()):
+        segment_queues[seg_key] = [t for t in segment_queues[seg_key] if current_time - t["depart_time"] < 600]
+        if not segment_queues[seg_key]:
+            del segment_queues[seg_key]
+
+    # 5. 【诊断检测】仅当 DEBUG=True 时才检测并写 debug.txt
+    conflict_details = []
+    if DEBUG:
+        for i, sta_code in enumerate(twl_stations):
+            if i < len(twl_stations) - 1:
+                next_code = twl_stations[i+1]
+                up_seg = f"TWL-UP-{next_code}->{sta_code}"
+                if arrived_status[sta_code]["UP"] and segment_queues.get(up_seg):
+                    for q_train in segment_queues[up_seg]:
+                        conflict_details.append(
+                            f"车站 [{sta_code}] UP 停靠着，但其入站轨道 [{up_seg}] 仍有残留车 (终点={q_train['dest']}, "
+                            f"压入轮次={q_train['depart_round']}, 压入时间={q_train['depart_time_str']})"
+                        )
+
+            if i > 0:
+                prev_code = twl_stations[i-1]
+                down_seg = f"TWL-DOWN-{prev_code}->{sta_code}"
+                if arrived_status[sta_code]["DOWN"] and segment_queues.get(down_seg):
+                    for q_train in segment_queues[down_seg]:
+                        conflict_details.append(
+                            f"车站 [{sta_code}] DOWN 停靠着，但其入站轨道 [{down_seg}] 仍有残留车 (终点={q_train['dest']}, "
+                            f"压入轮次={q_train['depart_round']}, 压入时间={q_train['depart_time_str']})"
+                        )
+
+        if conflict_details:
+            dump_debug_log(trains_data, conflict_details)
+
+    last_arrived_snapshot = current_arrived_snapshot
+
+    return {
+        "stations": twl_stations,
+        "arrived_status": arrived_status,
+        "segment_queues": segment_queues,
+        "errors": error_history,
+        "current_round": loop_round
+    }
+
+def draw_twl_trains(state_data):
+    """
+    第二部分：纯渲染逻辑（仅展示真正的站轨冲突 Bug，不打印普通在途列车残留）
+    """
+    if not state_data:
+        return
+        
+    twl_stations = state_data["stations"]
+    arrived_status = state_data["arrived_status"]
+    segment_queues = state_data["segment_queues"]
+    current_round = state_data.get("current_round", 0)
+
+    os.system('cls' if os.name == 'nt' else 'clear')
+    print(f"=== TWL Track Monitor [{time.strftime('%H:%M:%S')}] | 当前轮次 n={current_round} ===")
+
+    # 实时检测真实的“车站与相邻轨道同时占用”冲突
+    active_conflicts = []
+    for i, sta_code in enumerate(twl_stations):
+        if i < len(twl_stations) - 1:
+            next_code = twl_stations[i+1]
+            up_seg = f"TWL-UP-{next_code}->{sta_code}"
+            if arrived_status[sta_code]["UP"] and segment_queues.get(up_seg):
+                for q_train in segment_queues[up_seg]:
+                    active_conflicts.append(
+                        f"车站 [{sta_code}] UP 停靠着，但其入站轨道 [{up_seg}] 仍有残留车 (终点={q_train['dest']}, 压入轮次={q_train['depart_round']})"
+                    )
+
+        if i > 0:
+            prev_code = twl_stations[i-1]
+            down_seg = f"TWL-DOWN-{prev_code}->{sta_code}"
+            if arrived_status[sta_code]["DOWN"] and segment_queues.get(down_seg):
+                for q_train in segment_queues[down_seg]:
+                    active_conflicts.append(
+                        f"车站 [{sta_code}] DOWN 停靠着，但其入站轨道 [{down_seg}] 仍有残留车 (终点={q_train['dest']}, 压入轮次={q_train['depart_round']})"
+                    )
+
+    # 仅当真正发生“站轨同时占用”时才在顶部报警，否则显示状态正常
+    if active_conflicts:
+        print("\033[91m[检测到 Bug] 发现车站与相邻路轨同时占用冲突：\033[0m")
+        for conflict in active_conflicts:
+            print(f"\033[91m  * {conflict}\033[0m")
+    else:
+        print("\033[92m[状态正常] 轨道追踪正常，无站轨冲突。\033[0m")
+
+    print("\n" + "="*50 + "\n")
+
+    for i, sta_code in enumerate(twl_stations):
+        plats = arrived_status[sta_code]["plats"]
+        green_plats = arrived_status[sta_code]["green_plats"]
+        
+        if sta_code == "CEN":
+            u_color = GREEN if "1" in green_plats else RED if "1" in plats else ""
+            d_color = GREEN if "2" in green_plats else RED if "2" in plats else ""
+            u_str = f"{u_color}CEN1{RESET}" if u_color else "CEN1"
+            d_str = f"{d_color}CEN2{RESET}" if d_color else "CEN2"
+        elif sta_code == "TSW":
+            up_arr = arrived_status[sta_code]["UP"]
+            u_color = GREEN if "2" in green_plats else RED if up_arr else ""
+            d_color = GREEN if "1" in green_plats else BLUE
+            u_str = f"{u_color}TSW2{RESET}" if u_color else "TSW2"
+            d_str = f"{d_color}TSW1{RESET}"
+        else:
+            up_arr = arrived_status[sta_code]["UP"]
+            down_arr = arrived_status[sta_code]["DOWN"]
+            up_plats = get_platforms(sta_code, "UP")
+            down_plats = get_platforms(sta_code, "DOWN")
+            up_label = "/".join(up_plats)
+            down_label = "/".join(down_plats)
+            u_color = GREEN if any(plat in green_plats for plat in up_plats) else RED if up_arr else ""
+            d_color = GREEN if any(plat in green_plats for plat in down_plats) else RED if down_arr else ""
+            u_str = f"{u_color}{sta_code}{up_label}{RESET}" if u_color else f"{sta_code}{up_label}"
+            d_str = f"{d_color}{sta_code}{down_label}{RESET}" if d_color else f"{sta_code}{down_label}"
+        
+        print(f"{u_str}\t\t{d_str}")
+        
+        if i < len(twl_stations) - 1:
+            next_code = twl_stations[i+1]
+            down_seg = f"TWL-DOWN-{sta_code}->{next_code}"
+            up_seg = f"TWL-UP-{next_code}->{sta_code}"
+            
+            down_has_train = bool(segment_queues.get(down_seg))
+            up_has_train = bool(segment_queues.get(up_seg))
+            down_has_non_terminal = any(
+                train["dest"] not in ("CEN", "TSW")
+                for train in segment_queues.get(down_seg, [])
+            )
+            up_has_non_terminal = any(
+                train["dest"] not in ("CEN", "TSW")
+                for train in segment_queues.get(up_seg, [])
+            )
+            
+            u_rail_color = GREEN if (up_has_train and up_has_non_terminal) else RED if up_has_train else ""
+            d_rail_color = GREEN if (down_has_train and down_has_non_terminal) else RED if down_has_train else ""
+            
+            if next_code == "TSW":
+                d_rail_color = BLUE
+
+            u_reset = RESET if u_rail_color else ""
+            d_reset = RESET if d_rail_color else ""
+
+            print(f"{u_rail_color}^{u_reset}\t\t{d_rail_color}v{d_reset}")
+
+    print("\n===============================")
+    for error in state_data.get("errors", []):
+        print(error)
 
 def mainloop(trains):
-    global last_arrived_snapshot, tracked_trains
-    
-    current_time = time.time()
-    current_arrived_snapshot = {}
-    
-    lines_data = trains.get("lines", {}) if "lines" in trains else {}
-    if not lines_data and "stations" in trains:
-        lines_data = {"TWL": trains}
-
-    for line_code, line_info in lines_data.items():
-        if not line_info.get("status"):
-            continue
-            
-        stations = line_info.get("stations", {})
-        
-        for sta_code, sta_data in stations.items():
-            if not isinstance(sta_data, dict) or "UP" not in sta_data:
-                continue
-                
-            sta_name = get_station_name(line_code, sta_code)
-            
-            for dir_key in ["UP", "DOWN"]:
-                train_list = sta_data.get(dir_key, [])
-                
-                for train in train_list:
-                    dest = train.get("dest")
-                    dest_name = get_station_name(line_code, dest) if dest else "未知"
-                    is_arrived = train.get("trainArrived", False) or (train.get("ttnt") == 0)
-                    
-                    if not dest:
-                        continue
-                        
-                    train_key = f"{line_code}-{dir_key}-{sta_code}-{dest}"
-                    
-                    if is_arrived:
-                        # 🌟 进站提示
-                        if train_key not in last_arrived_snapshot:
-                            debug(f"🟢 【进站】{line_code}线 {sta_name}({sta_code})站 [{dir_key}行] 往 {dest_name}方向 的列车已进站停靠")
-                            
-                        current_arrived_snapshot[train_key] = current_time
-                        
-                        match_idx = None
-                        for idx, tracked in enumerate(tracked_trains):
-                            next_sta = get_next_station(tracked["line"], tracked["dir"], tracked["from_sta"])
-                            
-                            if (tracked["line"] == line_code and 
-                                tracked["dir"] == dir_key and 
-                                next_sta == sta_code and 
-                                tracked["dest"] == dest):
-                                
-                                duration = int(current_time - tracked["depart_time"])
-                                from_name = get_station_name(line_code, tracked["from_sta"])
-                                segment_name = f"{tracked['from_sta']}->{sta_code}"
-                                
-                                debug(f"🎯 [区段测绘] {line_code}线 [{dir_key}行] {from_name} -> {sta_name} 实际耗时: {duration} 秒 (往 {dest_name})")
-                                
-                                if line_code not in transit_records:
-                                    transit_records[line_code] = {"UP": {}, "DOWN": {}}
-                                if segment_name not in transit_records[line_code][dir_key]:
-                                    transit_records[line_code][dir_key][segment_name] = []
-                                    
-                                transit_records[line_code][dir_key][segment_name].append(duration)
-                                save_results_to_txt()
-                                match_idx = idx
-                                break
-                                
-                        if match_idx is not None:
-                            tracked_trains.pop(match_idx)
-
-    # 离站检测
-    for old_key, arrived_time in last_arrived_snapshot.items():
-        if old_key not in current_arrived_snapshot:
-            parts = old_key.split("-")
-            line_code, dir_key, sta_code, dest = parts[0], parts[1], parts[2], parts[3]
-            
-            sta_name = get_station_name(line_code, sta_code)
-            dest_name = get_station_name(line_code, dest)
-            next_sta_code = get_next_station(line_code, dir_key, sta_code)
-            next_sta_name = get_station_name(line_code, next_sta_code) if next_sta_code else "终点"
-            
-            tracked_trains.append({
-                "line": line_code,
-                "dir": dir_key,
-                "from_sta": sta_code,
-                "dest": dest,
-                "depart_time": current_time
-            })
-            
-            # 🌟 离站提示
-            debug(f"🚀 【离站】{line_code}线 {sta_name}({sta_code})站 [{dir_key}行] 往 {dest_name}方向 的列车已离站，正开往 {next_sta_name}")
-
-    tracked_trains = [t for t in tracked_trains if current_time - t["depart_time"] < 600]
-    last_arrived_snapshot = current_arrived_snapshot
+    """主循环入口"""
+    state = calc_twl_state(trains)
+    draw_twl_trains(state)

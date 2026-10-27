@@ -5,7 +5,7 @@ from threading import Lock, local
 from requests.adapters import HTTPAdapter
 from data import MTR_NETWORK
 
-# 定义 debug 满足你的习惯
+# 调试开关
 DEBUG = False
 debug = lambda x: DEBUG and print(x)
 print_lock = Lock()
@@ -39,6 +39,7 @@ def wait_before_retry(response: requests.Response | None, attempt: int) -> None:
     except ValueError:
         delay = 0.4 * (2 ** (attempt - 1))
     time.sleep(min(delay, 4.0))
+
 
 def fetch_single_station(line: str, sta_code: str, sta_info: list, index: int, total_stations: int, headers: dict) -> tuple:
     """单独获取并清洗某个车站数据的函数（供全局线程池调用）"""
@@ -86,6 +87,7 @@ def fetch_single_station(line: str, sta_code: str, sta_info: list, index: int, t
                     wait_before_retry(response, attempt)
                     continue
                 return line, sta_code, {"success": False, "originalJson": response.text, "message": "Invalid JSON response"}, status_msg
+                
             debug(f"[DEBUG] 线路 {line} 车站 {sta_code} 返回: {res_json}")
             
             # 检查 NT-204 或 status == 0
@@ -113,12 +115,17 @@ def fetch_single_station(line: str, sta_code: str, sta_info: list, index: int, t
                     clean_time = raw_time.split(" ")[1] if " " in raw_time else raw_time
                     
                     raw_ttnt = train.get("ttnt")
-                    ttnt_val = int(raw_ttnt) if raw_ttnt is not None and str(raw_ttnt).isdigit() else 0
+                    ttnt_val = int(raw_ttnt) if raw_ttnt is not None and str(raw_ttnt).isdigit() else 99
                     
+                    plat_val = train.get("plat")
+                    # 针对部分车站若API缺省月台的兜底适配（可根据需要微调）
+                    if not plat_val and sta_code == "CEN":
+                        plat_val = "1"
+                        
                     formatted_train = {
                         "time": clean_time,
                         "dest": train.get("dest"),
-                        "plat": train.get("plat"),
+                        "plat": plat_val,
                         "ttnt": ttnt_val,
                         "trainArrived": (ttnt_val == 0)
                     }
@@ -130,12 +137,16 @@ def fetch_single_station(line: str, sta_code: str, sta_info: list, index: int, t
                     clean_time = raw_time.split(" ")[1] if " " in raw_time else raw_time
                     
                     raw_ttnt = train.get("ttnt")
-                    ttnt_val = int(raw_ttnt) if raw_ttnt is not None and str(raw_ttnt).isdigit() else 0
+                    ttnt_val = int(raw_ttnt) if raw_ttnt is not None and str(raw_ttnt).isdigit() else 99
                     
+                    plat_val = train.get("plat")
+                    if not plat_val and sta_code == "CEN":
+                        plat_val = "2"
+                        
                     formatted_train = {
                         "time": clean_time,
                         "dest": train.get("dest"),
-                        "plat": train.get("plat"),
+                        "plat": plat_val,
                         "ttnt": ttnt_val,
                         "trainArrived": (ttnt_val == 0)
                     }
@@ -172,7 +183,7 @@ def fetch_single_station(line: str, sta_code: str, sta_info: list, index: int, t
             break
             
     with print_lock:
-        debug(f"[{index}/{total_stations}] 线路: {line} | 车站: {sta_code} ({sta_info[0]}) ... {status_msg}")
+        debug(f"[{index}/{total_stations}] 线路: {line} | 车站: {sta_code} ({sta_info[0] if sta_info else ''}) ... {status_msg}")
         
     return line, sta_code, station_result, status_msg
 
@@ -182,7 +193,7 @@ def getTrains(line: str) -> dict:
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     }
     
-    # 🌟 核心改进：当输入 "ALL" 时，把全网所有线路的所有车站全部收集起来，丢进同一个线程池同时并发！
+    # 支持 "ALL" 全网并发获取
     if line.upper() == "ALL":
         all_tasks = []
         for l_code, station_dict in MTR_NETWORK.items():
@@ -197,8 +208,6 @@ def getTrains(line: str) -> dict:
             "lines": {l_code: {"status": True, "stations": {}} for l_code in MTR_NETWORK.keys()}
         }
         
-        # 所有车站共用一个线程池；并发过高会触发官方接口限流。
-        # 为了防止被限流，我们将并发数限制为 8。
         max_workers = ALL_MAX_WORKERS
         
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -215,8 +224,9 @@ def getTrains(line: str) -> dict:
         debug(f"\n🎉 【全网全局并发】所有线路和车站数据全部抓取完毕！")
         return output
 
-    # 保持单条线路查询的兼容性
+    # 单条线路查询
     if line not in MTR_NETWORK:
+        debug(f"❌ 无效的线路代码: {line}")
         return {"status": False, "error": "Invalid line code"}
         
     station_dict = MTR_NETWORK[line]
@@ -242,14 +252,10 @@ def getTrains(line: str) -> dict:
 
 
 if __name__ == "__main__":
-    # 🌟 直接测试全局并发获取 "ALL"
     all_data = getTrains("ALL")
-    
     for line_code, line_res in all_data["lines"].items():
         debug(f"\n==================== [{line_code}] 线路数据 ====================")
         if line_res["status"]:
             for sta_code, sta_data in line_res["stations"].items():
                 if isinstance(sta_data, dict) and "UP" in sta_data and "DOWN" in sta_data:
                     debug(f"✨ [{sta_code}] 站实时数据：上行 {len(sta_data['UP'])} 班次 | 下行 {len(sta_data['DOWN'])} 班次")
-                else:
-                    debug(f"⚠️ [{sta_code}] 站状态: {sta_data.get('message', '未知')}")
