@@ -5,7 +5,8 @@ from api import getTrains
 from core import calc_twl_state
 
 app = Flask(__name__)
-
+DEBUG = False  # 调试开关
+debug = lambda x: DEBUG and print(x)
 # 全局状态变量
 last_active_time = time.time()  
 latest_state_cache = {}         
@@ -22,9 +23,10 @@ def background_api_worker():
         current_time = time.time()
         idle_duration = current_time - last_active_time
         
+        debug(f"Idle duration: {idle_duration}")
         # 超过 10 秒无网页访问，暂停 API
         if idle_duration > INACTIVE_TIMEOUT:
-            print(f"💤 [休眠中] 已经超过 10 秒无用户访问网页 (闲置 {int(idle_duration)}秒)，已停止访问 NextTrainAPI。")
+            debug(f"💤 [休眠中] 已经超过 10 秒无用户访问网页 (闲置 {int(idle_duration)}秒)，已停止访问 NextTrainAPI。")
             with lock:
                 data_fresh_flag = False  # 标记数据失效/过时
             time.sleep(3)
@@ -32,7 +34,7 @@ def background_api_worker():
             
         # 用户在线，开始请求 API
         try:
-            print("🚀 [API请求] 用户在线，正在请求港铁 NextTrainAPI...")
+            debug("🚀 [API请求] 用户在线，正在请求港铁 NextTrainAPI...")
             raw_trains = getTrains("TWL")
             state = calc_twl_state(raw_trains)
             
@@ -49,7 +51,7 @@ def background_api_worker():
                 data_fresh_flag = True  # 标记已有新鲜数据
                 
         except Exception as e:
-            print(f"❌ 后端调用 NextTrainAPI 报错: {e}")
+            debug(f"❌ 后端调用 NextTrainAPI 报错: {e}")
             
         time.sleep(5)
 
@@ -85,6 +87,7 @@ def twl_status():
     })
 
 if __name__ == '__main__':
+    DEBUG = True  # 调试开关
     print("🚀 港铁实时监控网页端已启动: http://127.0.0.1:5000")
     print("💡 智能防 429 机制已生效：阈值 10 秒，未访问网页时自动停止访问 NextTrainAPI。")
     
