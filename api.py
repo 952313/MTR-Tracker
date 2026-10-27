@@ -1,0 +1,2 @@
+import requests
+def getAllStations()
