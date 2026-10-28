@@ -1,5 +1,5 @@
 # ==============================================================================
-# KTLcore.py (观塘线专属核心逻辑与渲染模块 - HOM 终点车前一站 YMT 直接删除)
+# KTLcore.py (观塘线专属核心逻辑与渲染模块 - 修复字典推导式 NameError)
 # ==============================================================================
 import time
 import os
@@ -7,7 +7,7 @@ import json
 from data import MTR_NETWORK, KTL_PLATFORMS
 
 # 🔴 开启调试开关
-DEBUG = True
+DEBUG = False
 
 # ANSI 颜色定义
 RED = "\033[91m"
@@ -22,10 +22,7 @@ last_arrived_snapshot = {}
 error_history = []
 loop_round = 0
 
-# HOM 标蓝/盲区状态机: 
-# 0 = 正常无标蓝
-# 1 = 绿车到达 YMT4，HOM2 车站与 YMT-HOM 中间轨道 ^ 均标蓝（绿车离开/删除后仍保留蓝色）
-# 2 = 下一个红车到达 YMT4，中间轨道 ^ 解除蓝色（变白），但 HOM2 维持蓝色
+# HOM 标蓝/盲区状态机
 hom_blue_state = 0  
 last_ymt_has_red = False
 
@@ -63,6 +60,8 @@ def get_platforms(sta_code: str, dir_key: str) -> list:
 
 def get_train_platform(sta_code: str, dir_key: str, train: dict) -> list:
     actual_plat = str(train.get("plat", ""))
+    if sta_code == "WHA":
+        return ["1"]
     if actual_plat and actual_plat != "0":
         return [actual_plat]
     return get_platforms(sta_code, dir_key)
@@ -98,9 +97,10 @@ def calc_ktl_state(trains_data):
         and "UP" in stations_data[sta_code] and "DOWN" in stations_data[sta_code]
     }
     
+    # 💡 修复处：将键名从未定义的 sta 改为 sta_code
     arrived_status = {
-        sta: {"UP": False, "DOWN": False, "plats": set(), "green_plats": set(), "arrived_trains": {"UP": [], "DOWN": []}}
-        for sta in ktl_stations
+        sta_code: {"UP": False, "DOWN": False, "plats": set(), "green_plats": set(), "arrived_trains": {"UP": [], "DOWN": []}}
+        for sta_code in ktl_stations
     }
     
     # 1. 收集当前停靠状态
@@ -112,7 +112,11 @@ def calc_ktl_state(trains_data):
             train_list = sta_info.get(api_dir_key, [])
             for t in train_list:
                 ttnt = t.get("ttnt", 99)
-                is_arr = (ttnt == 0)
+                
+                if sta_code == "WHA":
+                    is_arr = (ttnt < 3)
+                else:
+                    is_arr = (ttnt == 0)
                 
                 if is_arr:
                     dest = t.get("dest", "UNKNOWN")
@@ -139,17 +143,15 @@ def calc_ktl_state(trains_data):
     ymt_has_hom_train = ("HOM" in ymt_up_trains)
     ymt_has_red_train = any(d in ("WHA", "UNKNOWN") for d in ymt_up_trains)
 
-    # 阶段 1：绿车到达 YMT4 $\rightarrow$ 激活标蓝 (hom_blue_state = 1)
     if ymt_has_hom_train and hom_blue_state == 0:
         hom_blue_state = 1
 
-    # 阶段 2：在标蓝状态下，下一个红车到达 YMT4 $\rightarrow$ 中间轨道解除蓝色，HOM2 保持蓝色 (hom_blue_state = 2)
     if hom_blue_state == 1 and ymt_has_red_train and not last_ymt_has_red:
         hom_blue_state = 2
 
     last_ymt_has_red = ymt_has_red_train
 
-    # 2. 离站检测与入队（核心修复：以 HOM 为终点的列车在 YMT4 离开时直接删除，不进轨道队列）
+    # 2. 离站检测与入队
     for old_key, _ in last_arrived_snapshot.items():
         if old_key[2] not in valid_stations:
             current_arrived_snapshot[old_key] = _
@@ -159,13 +161,11 @@ def calc_ktl_state(trains_data):
             departure_dir = get_ktl_direction(sta_code, dest)
             next_sta = get_next_station(line_code, departure_dir, sta_code)
 
-            # 阶段 3：当红色车离开 YMT4 进入正线轨道时，彻底清除 HOM 附近的所有蓝色 (hom_blue_state = 0)
             if sta_code == "YMT" and departure_dir == "UP" and dest in ("WHA", "UNKNOWN"):
                 if hom_blue_state == 2:
                     hom_blue_state = 0
 
-            # 💡 核心删除业务：到达终点（WHA/TIK/HOM）或者在 HOM 终点的前一站（YMT4）离开时，直接删除/丢弃！
-            if sta_code == dest or (sta_code == "YAT" and dest == "TIK") or (sta_code == "YMT" and dest == "HOM"):
+            if sta_code == dest or (sta_code == "YAT" and dest == "TIK") or (sta_code == "YMT" and dest == "HOM") or (sta_code == "WHA"):
                 continue
 
             if next_sta:
@@ -259,7 +259,9 @@ def draw_ktl_trains(state_data):
             ch4_str = f"{p4_color}CHH4{RESET}" if p4_color else "CHH4"
             print(f"{ch4_str}\t\t{ch23_str}\t\t{ch1_str}")
         elif sta_code == "WHA":
-            wha_str = "WHA1"
+            wha_active = up_arr or down_arr
+            wha_color = RED if wha_active else ""
+            wha_str = f"{wha_color}WHA1{RESET}" if wha_color else "WHA1"
             print(f"{wha_str}\t\t\t\t{wha_str}")
         elif sta_code == "TIK":
             up_plats = get_platforms("TIK", "UP")
@@ -277,7 +279,6 @@ def draw_ktl_trains(state_data):
             u_color = GREEN if up_p in green_plats else RED if up_arr else ""
             d_color = GREEN if down_p in green_plats else RED if down_arr else ""
             
-            # HOM 车站标蓝逻辑：只要处于 blue_state 1 或 2，无车时就显示蓝色（有车时红/绿覆盖）
             if sta_code == "HOM":
                 if not u_color and blue_state in (1, 2):
                     u_color = BLUE
@@ -311,13 +312,10 @@ def draw_ktl_trains(state_data):
             else:
                 d_rail_color = ""
 
-            # HOM $\rightarrow$ YMT 之间的上行轨道 `^` 标蓝逻辑：
-            # 只有在 blue_state == 1 且轨道上没有列车时，才显示蓝色；若 blue_state == 2（红车到了 YMT4），中间轨道变回白色/无色
             if sta_code == "HOM" and next_code == "YMT":
                 if not up_has_train and blue_state == 1:
                     u_rail_color = BLUE
 
-            # TIK 盲区保持原样
             if next_code == "TIK":
                 d_rail_color = BLUE
             elif sta_code == "TIK":

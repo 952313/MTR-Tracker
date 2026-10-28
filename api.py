@@ -187,30 +187,30 @@ def fetch_single_station(line: str, sta_code: str, sta_info: list, index: int, t
         
     return line, sta_code, station_result, status_msg
 
-
+# 在 api.py 的 getTrains 函数中增加对复合线路（如 "TWL&KTL"）的支持
 def getTrains(line: str) -> dict:
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     }
     
-    # 支持 "ALL" 全网并发获取
-    if line.upper() == "ALL":
+    # 支持传入如 "TWL&KTL" 或 "ALL"
+    if "&" in line or line.upper() == "ALL":
+        target_lines = list(MTR_NETWORK.keys()) if line.upper() == "ALL" else [l.strip().upper() for l in line.split("&")]
         all_tasks = []
-        for l_code, station_dict in MTR_NETWORK.items():
-            for sta_code, sta_info in station_dict.items():
-                all_tasks.append((l_code, sta_code, sta_info))
+        for l_code in target_lines:
+            if l_code in MTR_NETWORK:
+                for sta_code, sta_info in MTR_NETWORK[l_code].items():
+                    all_tasks.append((l_code, sta_code, sta_info))
                 
         total_tasks = len(all_tasks)
-        debug(f"🚀 开始【全网全局并发】获取所有线路数据，总计 {len(MTR_NETWORK)} 条线路，{total_tasks} 个车站...\n")
+        debug(f"🚀 开始【多线路并发】获取目标线路数据，总计 {total_tasks} 个车站...\n")
         
         output = {
             "status": True,
-            "lines": {l_code: {"status": True, "stations": {}} for l_code in MTR_NETWORK.keys()}
+            "lines": {l_code: {"status": True, "stations": {}} for l_code in target_lines}
         }
         
-        max_workers = ALL_MAX_WORKERS
-        
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        with ThreadPoolExecutor(max_workers=ALL_MAX_WORKERS) as executor:
             future_to_info = {
                 executor.submit(fetch_single_station, l_code, sta_code, sta_info, i, total_tasks, headers): (l_code, sta_code)
                 for i, (l_code, sta_code, sta_info) in enumerate(all_tasks, 1)
@@ -218,13 +218,12 @@ def getTrains(line: str) -> dict:
             
             for future in as_completed(future_to_info):
                 l_code, sta_code, station_result, msg = future.result()
-                if station_result is not None:
+                if station_result is not None and l_code in output["lines"]:
                     output["lines"][l_code]["stations"][sta_code] = station_result
                     
-        debug(f"\n🎉 【全网全局并发】所有线路和车站数据全部抓取完毕！")
         return output
 
-    # 单条线路查询
+    # 单条线路查询保持不变
     if line not in MTR_NETWORK:
         debug(f"❌ 无效的线路代码: {line}")
         return {"status": False, "error": "Invalid line code"}
@@ -233,9 +232,7 @@ def getTrains(line: str) -> dict:
     output = {"status": True, "stations": {}}
     total_stations = len(station_dict)
     
-    debug(f"🚀 开始并发获取 [{line}] 线全线数据，共计 {total_stations} 个车站...\n")
     max_workers = min(10, total_stations)
-    
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         future_to_sta = {
             executor.submit(fetch_single_station, line, sta_code, sta_info, index, total_stations, headers): sta_code
@@ -243,13 +240,11 @@ def getTrains(line: str) -> dict:
         }
         
         for future in as_completed(future_to_sta):
-            _, sta_code, station_result, msg = future.result()
+            _, sta_code, station_result, _ = future.result()
             if station_result is not None:
                 output["stations"][sta_code] = station_result
                 
-    debug(f"🎉 [{line}] 线所有车站数据抓取完毕！")
     return output
-
 
 if __name__ == "__main__":
     all_data = getTrains("ALL")

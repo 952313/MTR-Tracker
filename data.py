@@ -178,6 +178,48 @@ ISL = {
     "CHW": ["Chai Wan", "柴灣", "柴湾"]
 }
 
+# 港岛线各方向使用的月台配置；UP 为 CHW -> KET（往坚尼地城），DOWN 为 KET -> CHW（往柴湾）
+ISL_PLATFORMS = {
+    "UP": {
+        "KET": ["2"],
+        "HKU": ["2"],
+        "SYP": ["2"],
+        "SHW": ["2"],
+        "CEN": ["3"],
+        "ADM": ["3"],
+        "WAC": ["2"],
+        "CAB": ["2"],
+        "TIH": ["2"],
+        "FOH": ["2"],
+        "NOP": ["2"],
+        "QUB": ["2"],
+        "TAK": ["2"],
+        "SWH": ["2"],
+        "SKW": ["2"],
+        "HFC": ["2"],
+        "CHW": ["1", "2"]
+    },
+    "DOWN": {
+        "KET": ["1"],
+        "HKU": ["1"],
+        "SYP": ["1"],
+        "SHW": ["1"],
+        "CEN": ["4"],
+        "ADM": ["4"],
+        "WAC": ["1"],
+        "CAB": ["1"],
+        "TIH": ["1"],
+        "FOH": ["1"],
+        "NOP": ["1"],
+        "QUB": ["1"],
+        "TAK": ["1"],
+        "SWH": ["1"],
+        "SKW": ["1"],
+        "HFC": ["1"],
+        "CHW": ["1", "2"]
+    }
+}
+
 # 9. 观塘线 Kwun Tong Line
 KTL = {
     "WHA": ["Whampoa", "黃埔", "黄埔"],
@@ -248,13 +290,14 @@ KTL_PLATFORMS = {
 # 总网络列表
 # ==============================================================================
 MTR_NETWORK = {
-    "AEL": AEL,
-    "TCL": TCL,
-    "TML": TML,
-    "TKL": TKL,
-    "EAL": EAL,
-    "SIL": SIL,
+#    "AEL": AEL,
+#    "TCL": TCL,
+#    "TML": TML,
+#    "TKL": TKL,
+#    "EAL": EAL,
+#    "SIL": SIL,
     "TWL": TWL,
     "ISL": ISL,
     "KTL": KTL
 }
+# Some of them are not done yet, so they are commented out to avoid errors.

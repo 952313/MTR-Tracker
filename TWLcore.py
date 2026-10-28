@@ -1,5 +1,5 @@
 # ==============================================================================
-# core.py (完整整合版)
+# core.py (完整整合版 - CEN终点免校验更新版)
 # ==============================================================================
 import time
 import os
@@ -145,6 +145,11 @@ def calc_twl_state(trains_data):
                 if is_arr:
                     dest = t.get("dest", "UNKNOWN")
                     real_dir = get_twl_direction(sta_code, dest)
+                    # 💡 针对终点站 CEN/TSW 强制校正进站方向，防止因终点站改变导致方向误判
+                    if sta_code == "CEN":
+                        real_dir = "UP"
+                    elif sta_code == "TSW":
+                        real_dir = "DOWN"
                     
                     arrived_status[sta_code][real_dir] = True
                     configured_plats = get_train_platform(sta_code, real_dir, t)
@@ -198,6 +203,12 @@ def calc_twl_state(trains_data):
         for dir_key in ["UP", "DOWN"]:
             for dest in arrived_status[sta_code]["arrived_trains"][dir_key]:
                 train_dir = get_twl_direction(sta_code, dest)
+                # 💡 针对终点站 CEN/TSW 强制校正方向以匹配正确的入站段队列
+                if sta_code == "CEN":
+                    train_dir = "UP"
+                elif sta_code == "TSW":
+                    train_dir = "DOWN"
+                
                 stations_list = twl_stations
                 idx = stations_list.index(sta_code)
                 prev_sta = None
@@ -211,13 +222,18 @@ def calc_twl_state(trains_data):
                     seg_key = f"TWL-{train_dir}-{prev_sta}->{sta_code}"
                     if seg_key in segment_queues and segment_queues[seg_key]:
                         is_cross_harbor = seg_key.endswith("TST->ADM") or seg_key.endswith("ADM->TST")
-                        matching_index = next(
-                            (index for index, train in enumerate(segment_queues[seg_key])
-                             if train["dest"] == dest),
-                            None
-                        )
-                        if matching_index is None:
+                        
+                        # 💡 如果当前到达站是 CEN，则设为唯一一个不验证终点的车站（忽略 dest 匹配，直接匹配队列中的第一辆车）
+                        if sta_code == "CEN":
                             matching_index = 0
+                        else:
+                            matching_index = next(
+                                (index for index, train in enumerate(segment_queues[seg_key])
+                                 if train["dest"] == dest),
+                                None
+                            )
+                            if matching_index is None:
+                                matching_index = 0
                         
                         matching_train = segment_queues[seg_key][matching_index]
                         elapsed = current_time - matching_train["depart_time"]
@@ -298,6 +314,8 @@ def draw_twl_trains(state_data):
             prev_code = twl_stations[i-1]
             down_seg = f"TWL-DOWN-{prev_code}->{sta_code}"
             if arrived_status[sta_code]["DOWN"] and segment_queues.get(down_seg):
+                for q_train in segment_queues[q_train]: # type: ignore
+                    pass
                 for q_train in segment_queues[down_seg]:
                     active_conflicts.append(
                         f"车站 [{sta_code}] DOWN 停靠着，但其入站轨道 [{down_seg}] 仍有残留车 (终点={q_train['dest']}, 压入轮次={q_train['depart_round']})"
@@ -325,9 +343,9 @@ def draw_twl_trains(state_data):
         elif sta_code == "TSW":
             up_arr = arrived_status[sta_code]["UP"]
             u_color = GREEN if "2" in green_plats else RED if up_arr else ""
-            d_color = GREEN if "1" in green_plats else BLUE
+            d_color = BLUE  # 💡 强制 TSW1 为蓝色
             u_str = f"{u_color}TSW2{RESET}" if u_color else "TSW2"
-            d_str = f"{d_color}TSW1{RESET}"
+            d_str = f"{BLUE}TSW1{RESET}"
         else:
             up_arr = arrived_status[sta_code]["UP"]
             down_arr = arrived_status[sta_code]["DOWN"]
