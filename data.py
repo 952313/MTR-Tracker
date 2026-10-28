@@ -1,3 +1,23 @@
+# -*- coding: utf-8 -*-
+# SPDX-License-Identifier: AGPL-3.0-or-later
+"""
+    MTR Tracker
+    Copyright (C) 2026 Yang Jincheng
+
+    This program is free software: you can redistribute it and/or modify
+    it under the terms of the GNU Affero General Public License as
+    published by the Free Software Foundation, either version 3 of the
+    License, or (at your option) any later version.
+
+    This program is distributed in the hope that it will be useful,
+    but WITHOUT ANY WARRANTY; without even the implied warranty of
+    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+    GNU Affero General Public License for more details.
+
+    You should have received a copy of the GNU Affero General Public License
+    along with this program.  If not, see <https://www.gnu.org/licenses/>.
+"""
+
 # ==============================================================================
 # 港铁 (MTR) 官方线路与车站数据字典 (data.py)
 # 依据 Next Train API Specification v1.6 官方文档重新整理

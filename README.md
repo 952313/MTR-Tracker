@@ -57,3 +57,10 @@
 * **并发控制**：`ThreadPoolExecutor` 与 `threading.Lock` 线程安全缓存
 
 详情请参考 `requirements.txt`。
+---
+## 版权声明与共享协议
+版权所有 (c) 2026 Yang Jincheng
+使用AGPL v3.0共享协议
+
+Copyright (c) 2026 Yang Jincheng
+Licensed under the AGPL v3.0 License.
