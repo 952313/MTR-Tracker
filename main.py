@@ -1,7 +1,7 @@
 from api import getTrains
 from time import sleep
-from core import mainloop
+from KTLcore import mainloop
 while True:
-    trains = getTrains("TWL")
+    trains = getTrains("KTL")
     mainloop(trains)
-    sleep(5)
+    sleep(10)
