@@ -146,7 +146,14 @@ def calc_twl_state(trains_data):
     }
     
     arrived_status = {
-        sta: {"UP": False, "DOWN": False, "plats": set(), "green_plats": set()}
+        sta: {
+            "UP": False, 
+            "DOWN": False, 
+            "plats": set(), 
+            "green_plats": set(),
+            "up_plat": "1" if sta == "CEN" else ("/".join(get_platforms(sta, "UP")) if get_platforms(sta, "UP") else "-"),
+            "down_plat": "2" if sta == "CEN" else ("/".join(get_platforms(sta, "DOWN")) if get_platforms(sta, "DOWN") else "-")
+        }
         for sta in twl_stations
     }
     
@@ -334,8 +341,6 @@ def draw_twl_trains(state_data):
             prev_code = twl_stations[i-1]
             down_seg = f"TWL-DOWN-{prev_code}->{sta_code}"
             if arrived_status[sta_code]["DOWN"] and segment_queues.get(down_seg):
-                for q_train in segment_queues[q_train]: # type: ignore
-                    pass
                 for q_train in segment_queues[down_seg]:
                     active_conflicts.append(
                         f"车站 [{sta_code}] DOWN 停靠着，但其入站轨道 [{down_seg}] 仍有残留车 (终点={q_train['dest']}, 压入轮次={q_train['depart_round']})"

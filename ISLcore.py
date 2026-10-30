@@ -18,7 +18,7 @@
     along with this program.  If not, see <https://www.gnu.org/licenses/>.
 """
 # ==============================================================================
-# ISLcore.py (港岛线专属核心逻辑与渲染模块)
+# ISLcore.py (港岛线专属核心逻辑与渲染模块 - CHW 1/2 号月台精准隔离映射版)
 # ==============================================================================
 import time
 import os
@@ -78,11 +78,10 @@ def get_platforms(sta_code: str, dir_key: str) -> list:
     return ISL_PLATFORMS.get(dir_key, {}).get(sta_code, [])
 
 def get_train_platform(sta_code: str, dir_key: str, train: dict) -> list:
-    configured_plats = get_platforms(sta_code, dir_key)
     actual_plat = str(train.get("plat", ""))
     if actual_plat and actual_plat != "0":
         return [actual_plat]
-    return configured_plats
+    return get_platforms(sta_code, dir_key)
 
 def calc_isl_state(trains_data):
     global last_arrived_snapshot, segment_queues, error_history, loop_round
@@ -114,10 +113,24 @@ def calc_isl_state(trains_data):
         and "DOWN" in stations_data[sta_code]
     }
     
-    arrived_status = {
-        sta: {"UP": False, "DOWN": False, "plats": set(), "green_plats": set()}
-        for sta in isl_stations
-    }
+    # 静态分配固定方向月台号码：
+    # UP 侧（左）：CEN 为 "3"，KET 为 "2"（盲区标蓝），CHW 明确固定为 "2"，其余为 "2"
+    # DOWN 侧（右）：CEN 为 "4"，KET 为 "1"，CHW 明确固定为 "1"，其余为 "1"
+    arrived_status = {}
+    for sta in isl_stations:
+        up_p = "3" if sta == "CEN" else ("2" if sta in ("KET", "CHW") else ("/".join(get_platforms(sta, "UP")) or "-"))
+        down_p = "4" if sta == "CEN" else ("1" if sta in ("KET", "CHW") else ("/".join(get_platforms(sta, "DOWN")) or "-"))
+        
+        arrived_status[sta] = {
+            "UP": False, 
+            "DOWN": False, 
+            "plats": set(), 
+            "green_plats": set(),
+            "blue_plats": ["2"] if sta == "KET" else [],
+            "up_plat": up_p,
+            "down_plat": down_p,
+            "arrived_trains": {"UP": [], "DOWN": []}
+        }
     
     # 1. 收集当前停靠状态：两端终点站 KET 和 CHW 采用 ttnt <= 5（n=5）作为开出/停靠判断
     for sta_code in isl_stations:
@@ -135,10 +148,29 @@ def calc_isl_state(trains_data):
                     dest = t.get("dest", "UNKNOWN")
                     real_dir = get_isl_direction(sta_code, dest)
                     
-                    arrived_status[sta_code][real_dir] = True
                     configured_plats = get_train_platform(sta_code, real_dir, t)
-                    plats_arrived.update(configured_plats)
+                    actual_plat = str(t.get("plat", ""))
                     
+                    # 💡【核心精确定位规则】：针对 CHW（柴湾）站，严禁月台混淆或错位！
+                    # 只有当 API 明确返回 plat="2" 时，才允许点亮 UP(左侧)；
+                    # 只有当 API 明确返回 plat="1" 时，才允许点亮 DOWN(右侧)。
+                    if sta_code == "CHW":
+                        if actual_plat == "2":
+                            arrived_status[sta_code]["UP"] = True
+                            plats_arrived.add("2")
+                        elif actual_plat == "1":
+                            arrived_status[sta_code]["DOWN"] = True
+                            plats_arrived.add("1")
+                        elif "2" in configured_plats and real_dir == "UP":
+                            arrived_status[sta_code]["UP"] = True
+                            plats_arrived.add("2")
+                        elif "1" in configured_plats and real_dir == "DOWN":
+                            arrived_status[sta_code]["DOWN"] = True
+                            plats_arrived.add("1")
+                    else:
+                        arrived_status[sta_code][real_dir] = True
+                        plats_arrived.update(configured_plats)
+
                     if dest not in ("KET", "CHW"):
                         arrived_status[sta_code]["green_plats"].update(configured_plats)
                         
@@ -225,7 +257,7 @@ def calc_isl_state(trains_data):
     }
 
 def draw_isl_trains(state_data):
-    """第二部分：纯渲染逻辑（适配 KET2 标蓝站后折返）"""
+    """第二部分：纯渲染逻辑（终端终端终端适配）"""
     if not state_data:
         return
         
@@ -243,18 +275,16 @@ def draw_isl_trains(state_data):
         green_plats = arrived_status[sta_code]["green_plats"]
         
         if sta_code == "KET":
-            # 坚尼地城站：KET2 是终点折返月台（站后折返标蓝无法跟踪），KET1(往柴湾方向出发)正常显示
             down_arr = arrived_status[sta_code]["DOWN"]
             u_color = BLUE  # KET2 标蓝
             d_color = GREEN if "1" in green_plats else RED if down_arr else ""
             u_str = f"{u_color}KET2{RESET}"
             d_str = f"{d_color}KET1{RESET}" if d_color else "KET1"
         elif sta_code == "CHW":
-            # 柴湾站：站前折返，两端月台均正常显示
             up_arr = arrived_status[sta_code]["UP"]
             down_arr = arrived_status[sta_code]["DOWN"]
-            u_color = GREEN if "2" in green_plats else RED if up_arr else ""
-            d_color = GREEN if "1" in green_plats else RED if down_arr else ""
+            u_color = GREEN if "2" in green_plats else RED if (up_arr or "2" in plats) else ""
+            d_color = GREEN if "1" in green_plats else RED if (down_arr or "1" in plats) else ""
             u_str = f"{u_color}CHW2{RESET}" if u_color else "CHW2"
             d_str = f"{d_color}CHW1{RESET}" if d_color else "CHW1"
         else:
@@ -285,7 +315,6 @@ def draw_isl_trains(state_data):
             u_rail_color = RED if up_has_train else ""
             d_rail_color = RED if down_has_train else ""
             
-            # KET 终点折返段轨道标蓝适配
             if next_code == "HKU" and sta_code == "KET":
                 u_rail_color = BLUE
 

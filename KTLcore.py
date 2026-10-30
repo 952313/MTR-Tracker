@@ -19,7 +19,7 @@
 """
 
 # ==============================================================================
-# KTLcore.py (观塘线专属核心逻辑与渲染模块 - 修复字典推导式 NameError)
+# KTLcore.py (观塘线专属核心逻辑与渲染模块)
 # ==============================================================================
 import time
 import os
@@ -117,9 +117,20 @@ def calc_ktl_state(trains_data):
         and "UP" in stations_data[sta_code] and "DOWN" in stations_data[sta_code]
     }
     
-    # 💡 修复处：将键名从未定义的 sta 改为 sta_code
+    # 初始化 arrived_status，加入 up_plat、down_plat、blue_plats 以及 CHH 的 4 个月台 (mid2_plat, mid3_plat)
     arrived_status = {
-        sta_code: {"UP": False, "DOWN": False, "plats": set(), "green_plats": set(), "arrived_trains": {"UP": [], "DOWN": []}}
+        sta_code: {
+            "UP": False, 
+            "DOWN": False, 
+            "plats": set(), 
+            "green_plats": set(), 
+            "blue_plats": ["1"] if sta_code == "TIK" else [],
+            "up_plat": "1" if sta_code == "WHA" else ("4" if sta_code == "CHH" else ("/".join(get_platforms(sta_code, "UP")) if get_platforms(sta_code, "UP") else "-")),
+            "down_plat": "1" if sta_code == "WHA" else ("1" if sta_code == "CHH" else ("/".join(get_platforms(sta_code, "DOWN")) if get_platforms(sta_code, "DOWN") else "-")),
+            "mid2_plat": "2" if sta_code == "CHH" else None,
+            "mid3_plat": "3" if sta_code == "CHH" else None,
+            "arrived_trains": {"UP": [], "DOWN": []}
+        }
         for sta_code in ktl_stations
     }
     

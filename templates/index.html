@@ -116,7 +116,7 @@
             }
         }
 
-        // 💡 严格跟随服务器判定：如果是 TSW1、TIK1、KET2 等服务器端指定的固定/盲区月台，直接赋予蓝色样式
+        // 平台徽章样式逻辑
         function getPlatformBadgeStyle(platNum, staCode, arrivedPlats, greenPlats, isArrived) {
             if ((staCode === "TSW" && platNum === "1") || (staCode === "TIK" && platNum === "1") || (staCode === "KET" && platNum === "2")) {
                 return 'bg-blue-600 text-white border-blue-500 shadow-lg shadow-blue-900/50';
@@ -147,14 +147,19 @@
 
             let html = '';
 
+            // 动态选择站名颜色：TWL 红色，KTL 绿色，ISL 蓝色
+            let stationNameColorClass = 'text-red-500';
+            if (line === 'KTL') stationNameColorClass = 'text-emerald-500';
+            if (line === 'ISL') stationNameColorClass = 'text-blue-500';
+
             stations.forEach((staCode, index) => {
                 const staInfo = arrivedStatus[staCode] || { UP: false, DOWN: false, plats: [], green_plats: [] };
                 const greenPlats = staInfo.green_plats || [];
                 const arrivedPlats = staInfo.plats || [];
 
                 if (line === 'TWL') {
-                    let upPlatNum = (staCode === "CEN") ? "1" : "2";
-                    let downPlatNum = (staCode === "CEN") ? "2" : "1";
+                    let upPlatNum = (staInfo.up_plat !== undefined) ? staInfo.up_plat : '-';
+                    let downPlatNum = (staInfo.down_plat !== undefined) ? staInfo.down_plat : '-';
 
                     const upIsArrived = arrivedPlats.includes(upPlatNum) || (staCode !== "CEN" && staInfo.UP);
                     const downIsArrived = arrivedPlats.includes(downPlatNum) || (staCode !== "CEN" && staInfo.DOWN);
@@ -171,7 +176,7 @@
                                     <span>${(staCode === "TSW" && upPlatNum === "1") ? '○' : (upIsArrived || greenPlats.includes(upPlatNum) ? '●' : '○')}</span>
                                 </div>
                             </div>
-                            <div class="text-center font-mono font-black text-xl text-amber-400">${staCode}</div>
+                            <div class="text-center font-mono font-black text-xl ${stationNameColorClass}">${staCode}</div>
                             <div class="w-36 flex items-center justify-end">
                                 <div class="w-full px-3 py-1.5 rounded-lg text-xs font-mono font-bold border transition-all flex items-center justify-between ${downBadgeClass}">
                                     <span>${(staCode === "TSW" && downPlatNum === "1") ? '○' : (downIsArrived || greenPlats.includes(downPlatNum) ? '●' : '○')}</span>
@@ -201,11 +206,8 @@
                     }
 
                 } else if (line === 'KTL') {
-                    let upPlatNum = "2";
-                    let downPlatNum = "1";
-                    if (staCode === "WHA") { upPlatNum = "1"; downPlatNum = "1"; }
-                    if (staCode === "TIK") { upPlatNum = "2"; downPlatNum = "1"; }
-                    if (staCode === "CHH") { upPlatNum = "4"; downPlatNum = "1"; }
+                    let upPlatNum = (staInfo.up_plat !== undefined) ? staInfo.up_plat : '-';
+                    let downPlatNum = (staInfo.down_plat !== undefined) ? staInfo.down_plat : '-';
 
                     const upIsArrived = staInfo.UP || arrivedPlats.includes(upPlatNum);
                     const downIsArrived = staInfo.DOWN || arrivedPlats.includes(downPlatNum);
@@ -213,19 +215,21 @@
                     let upBadgeClass = getPlatformBadgeStyle(upPlatNum, staCode, arrivedPlats, greenPlats, upIsArrived);
                     let downBadgeClass = getPlatformBadgeStyle(downPlatNum, staCode, arrivedPlats, greenPlats, downIsArrived);
 
-                    let middleHtml = `<div class="text-center font-mono font-black text-xl text-amber-400">${staCode}</div>`;
+                    let middleHtml = `<div class="text-center font-mono font-black text-xl ${stationNameColorClass}">${staCode}</div>`;
                     if (staCode === "CHH") {
-                        const midBadgeClass2 = getPlatformBadgeStyle("2", staCode, arrivedPlats, greenPlats, arrivedPlats.includes("2"));
-                        const midBadgeClass3 = getPlatformBadgeStyle("3", staCode, arrivedPlats, greenPlats, arrivedPlats.includes("3"));
+                        let mid2Plat = (staInfo.mid2_plat !== undefined) ? staInfo.mid2_plat : '-';
+                        let mid3Plat = (staInfo.mid3_plat !== undefined) ? staInfo.mid3_plat : '-';
+                        const midBadgeClass2 = getPlatformBadgeStyle(mid2Plat, staCode, arrivedPlats, greenPlats, arrivedPlats.includes(mid2Plat));
+                        const midBadgeClass3 = getPlatformBadgeStyle(mid3Plat, staCode, arrivedPlats, greenPlats, arrivedPlats.includes(mid3Plat));
 
                         middleHtml = `
                             <div class="flex items-center justify-center gap-3">
                                 <div class="px-2.5 py-1 rounded-md text-[10px] font-mono font-bold border flex items-center gap-1.5 ${midBadgeClass2}">
-                                    <span class="opacity-70">PF</span><span>2</span><span>${arrivedPlats.includes("2") || greenPlats.includes("2") ? '●' : '○'}</span>
+                                    <span class="opacity-70">PF</span><span>${mid2Plat}</span><span>${arrivedPlats.includes(mid2Plat) || greenPlats.includes(mid2Plat) ? '●' : '○'}</span>
                                 </div>
-                                <span class="font-mono font-black text-xl text-amber-400 px-2">${staCode}</span>
+                                <span class="font-mono font-black text-xl ${stationNameColorClass} px-2">${staCode}</span>
                                 <div class="px-2.5 py-1 rounded-md text-[10px] font-mono font-bold border flex items-center gap-1.5 ${midBadgeClass3}">
-                                    <span>${arrivedPlats.includes("3") || greenPlats.includes("3") ? '●' : '○'}</span><span class="opacity-70">PF</span><span>3</span>
+                                    <span>${arrivedPlats.includes(mid3Plat) || greenPlats.includes(mid3Plat) ? '●' : '○'}</span><span class="opacity-70">PF</span><span>${mid3Plat}</span>
                                 </div>
                             </div>
                         `;
@@ -266,13 +270,13 @@
                     }
 
                 } else if (line === 'ISL') {
-                    let upPlatNum = "2";
-                    let downPlatNum = "1";
-                    if (staCode === "CEN") { upPlatNum = "3"; downPlatNum = "4"; }
-                    if (staCode === "ADM") { upPlatNum = "3"; downPlatNum = "4"; }
+                    // 读取后端发来的具体月台编号 (UP侧固定为2号，DOWN侧固定为1号)
+                    let upPlatNum = (staInfo.up_plat !== undefined) ? staInfo.up_plat : '-';
+                    let downPlatNum = (staInfo.down_plat !== undefined) ? staInfo.down_plat : '-';
 
-                    const upIsArrived = (staCode === "KET") ? false : (staInfo.UP || arrivedPlats.includes(upPlatNum));
-                    const downIsArrived = staInfo.DOWN || arrivedPlats.includes(downPlatNum);
+                    // 💡 精准到具体月台匹配判断：
+                    const upIsArrived = (staCode === "KET") ? false : (arrivedPlats.includes(upPlatNum) || staInfo.UP);
+                    const downIsArrived = arrivedPlats.includes(downPlatNum) || staInfo.DOWN;
 
                     let upBadgeClass = getPlatformBadgeStyle(upPlatNum, staCode, arrivedPlats, greenPlats, upIsArrived);
                     let downBadgeClass = getPlatformBadgeStyle(downPlatNum, staCode, arrivedPlats, greenPlats, downIsArrived);
@@ -284,7 +288,7 @@
                                     <span class="opacity-70">PF</span><span>${upPlatNum}</span><span>${staCode === "KET" ? '○' : (upIsArrived || greenPlats.includes(upPlatNum) ? '●' : '○')}</span>
                                 </div>
                             </div>
-                            <div class="text-center font-mono font-black text-xl text-blue-400">${staCode}</div>
+                            <div class="text-center font-mono font-black text-xl ${stationNameColorClass}">${staCode}</div>
                             <div class="w-36 flex items-center justify-end">
                                 <div class="w-full px-3 py-1.5 rounded-lg text-xs font-mono font-bold border transition-all flex items-center justify-between ${downBadgeClass}">
                                     <span>${downIsArrived || greenPlats.includes(downPlatNum) ? '●' : '○'}</span><span class="opacity-70">PF</span><span>${downPlatNum}</span>
