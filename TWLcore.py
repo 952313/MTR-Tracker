@@ -27,7 +27,7 @@ import json
 from data import MTR_NETWORK, TWL_PLATFORMS
 
 # 🔴 全局调试开关：设为 True 时累加轮次、输出黄字告警并写入 debug.txt
-DEBUG = True
+DEBUG = False
 
 # ANSI 颜色定义
 RED = "\033[91m"
