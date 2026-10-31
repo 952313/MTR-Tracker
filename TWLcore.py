@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """
-    MTR Tracker
+    MTR Tracker - TWL Core Engine
     Copyright (C) 2026 Yang Jincheng
 
     This program is free software: you can redistribute it and/or modify
@@ -19,20 +19,21 @@
 """
 
 # ==============================================================================
-# core.py (完整整合版 - CEN终点免校验更新版)
+# TWLcore.py (完整整合版 - 严格保留路轨检测/区间车/debug日志 + 先 Pop 后 Push 时序修复)
 # ==============================================================================
 import time
 import os
 import json
 from data import MTR_NETWORK, TWL_PLATFORMS
 
-# 🔴 全局调试开关：设为 False 时不累加轮次、不写 debug.txt
-DEBUG = False
+# 🔴 全局调试开关：设为 True 时累加轮次、输出黄字告警并写入 debug.txt
+DEBUG = True
 
 # ANSI 颜色定义
 RED = "\033[91m"
 BLUE = "\033[94m"
 GREEN = "\033[92m"
+YELLOW = "\033[93m"
 RESET = "\033[0m"
 
 # 全局内存中的在途列车队列、快照与轮次计数器
@@ -113,11 +114,10 @@ def dump_debug_log(trains_data, conflict_details):
 def calc_twl_state(trains_data):
     """
     第一部分：计算核心逻辑
-    处理离站检测、在途队列、进站匹配、过海校验，并返回整理好的状态数据
+    处理在途队列、到站/离站匹配、过海校验，并返回整理好的状态数据
     """
     global last_arrived_snapshot, segment_queues, error_history, loop_round
     
-    # 只有开启 DEBUG 时才累加轮次，防止无限运行导致整数溢出
     if DEBUG:
         loop_round += 1  
         
@@ -157,7 +157,9 @@ def calc_twl_state(trains_data):
         for sta in twl_stations
     }
     
-    # 1. 收集当前停靠状态（剔除会漂移的 api.time 字段，采用稳定的复合 Key）
+    # ----------------------------------------------------
+    # 1. 全量收集当前各站到站停靠状态
+    # ----------------------------------------------------
     for sta_code in twl_stations:
         sta_info = stations_data.get(sta_code, {})
         plats_arrived = set()
@@ -172,7 +174,6 @@ def calc_twl_state(trains_data):
                 if is_arr:
                     dest = t.get("dest", "UNKNOWN")
                     real_dir = get_twl_direction(sta_code, dest)
-                    # 💡 针对终点站 CEN/TSW 强制校正进站方向，防止因终点站改变导致方向误判
                     if sta_code == "CEN":
                         real_dir = "UP"
                     elif sta_code == "TSW":
@@ -187,7 +188,6 @@ def calc_twl_state(trains_data):
                         
                     arrived_trains[real_dir].append(dest)
                     
-                    # 💡 核心修复：移除 t.get("time", "")，防止时间漂移引发误判离站
                     snapshot_key = (
                         "TWL", real_dir, sta_code, dest,
                         str(t.get("plat", ""))
@@ -197,7 +197,65 @@ def calc_twl_state(trains_data):
         arrived_status[sta_code]["plats"] = plats_arrived
         arrived_status[sta_code]["arrived_trains"] = arrived_trains
 
-    # 2. 离站检测
+    # ----------------------------------------------------
+    # 2. 统一先处理进站匹配 (Pop)
+    # 彻底解决出站即被误消的问题；结合 FIFO 与 dest 后备匹配
+    # ----------------------------------------------------
+    for sta_code in twl_stations:
+        for dir_key in ["UP", "DOWN"]:
+            for dest in arrived_status[sta_code]["arrived_trains"][dir_key]:
+                train_dir = get_twl_direction(sta_code, dest)
+                if sta_code == "CEN":
+                    train_dir = "UP"
+                elif sta_code == "TSW":
+                    train_dir = "DOWN"
+                
+                stations_list = twl_stations
+                idx = stations_list.index(sta_code)
+                prev_sta = None
+                
+                if train_dir == "DOWN" and idx - 1 >= 0:
+                    prev_sta = stations_list[idx - 1]
+                elif train_dir == "UP" and idx + 1 < len(stations_list):
+                    prev_sta = stations_list[idx + 1]
+                
+                if prev_sta:
+                    seg_key = f"TWL-{train_dir}-{prev_sta}->{sta_code}"
+                    if seg_key in segment_queues and segment_queues[seg_key]:
+                        is_cross_harbor = seg_key.endswith("TST->ADM") or seg_key.endswith("ADM->TST")
+                        
+                        # CEN 站特权免校验，或匹配同 dest 的列车（后备匹配首辆）
+                        if sta_code == "CEN":
+                            matching_index = 0
+                        else:
+                            matching_index = next(
+                                (index for index, train in enumerate(segment_queues[seg_key])
+                                 if train["dest"] == dest),
+                                0
+                            )
+                        
+                        matching_train = segment_queues[seg_key][matching_index]
+                        elapsed = current_time - matching_train["depart_time"]
+                        round_diff = loop_round - matching_train["depart_round"]
+
+                        # DEBUG 告警检测
+                        if DEBUG:
+                            if round_diff < 1:
+                                print(f"\n{YELLOW}[WARNING] 极短轮次差冲突告警！{RESET}")
+                                print(f"区段: {seg_key} | 终点: {dest} | 轮次差: {round_diff} (小于1) | 耗时: {elapsed:.2f}s")
+                                print(f"触发轮次: #{loop_round} | 离站轮次: #{matching_train['depart_round']}\n")
+                            elif elapsed < 20.0:
+                                print(f"\n{YELLOW}[WARNING] 异常偏短区间耗时告警！{RESET}")
+                                print(f"区段: {seg_key} | 终点: {dest} | 耗时: {elapsed:.2f} 秒 (小于20秒阈值)")
+                                print(f"触发轮次: #{loop_round} | 离站时间: {matching_train['depart_time_str']}\n")
+
+                        # 过海段 >120 秒防卡死检验
+                        if not (is_cross_harbor and elapsed < 120):
+                            segment_queues[seg_key].pop(matching_index)
+
+    # ----------------------------------------------------
+    # 3. 统一后处理离站检测与入队 (Push)
+    # ----------------------------------------------------
     for old_key, _ in last_arrived_snapshot.items():
         if old_key[2] not in valid_stations:
             current_arrived_snapshot[old_key] = _
@@ -225,55 +283,17 @@ def calc_twl_state(trains_data):
                     "plat": old_key[4]
                 })
 
-    # 3. 进站匹配与过海段校验 (>120秒)
-    for sta_code in twl_stations:
-        for dir_key in ["UP", "DOWN"]:
-            for dest in arrived_status[sta_code]["arrived_trains"][dir_key]:
-                train_dir = get_twl_direction(sta_code, dest)
-                # 💡 针对终点站 CEN/TSW 强制校正方向以匹配正确的入站段队列
-                if sta_code == "CEN":
-                    train_dir = "UP"
-                elif sta_code == "TSW":
-                    train_dir = "DOWN"
-                
-                stations_list = twl_stations
-                idx = stations_list.index(sta_code)
-                prev_sta = None
-                
-                if train_dir == "DOWN" and idx - 1 >= 0:
-                    prev_sta = stations_list[idx - 1]
-                elif train_dir == "UP" and idx + 1 < len(stations_list):
-                    prev_sta = stations_list[idx + 1]
-                
-                if prev_sta:
-                    seg_key = f"TWL-{train_dir}-{prev_sta}->{sta_code}"
-                    if seg_key in segment_queues and segment_queues[seg_key]:
-                        is_cross_harbor = seg_key.endswith("TST->ADM") or seg_key.endswith("ADM->TST")
-                        
-                        # 💡 如果当前到达站是 CEN，则设为唯一一个不验证终点的车站（忽略 dest 匹配，直接匹配队列中的第一辆车）
-                        if sta_code == "CEN":
-                            matching_index = 0
-                        else:
-                            matching_index = next(
-                                (index for index, train in enumerate(segment_queues[seg_key])
-                                 if train["dest"] == dest),
-                                None
-                            )
-                            if matching_index is None:
-                                matching_index = 0
-                        
-                        matching_train = segment_queues[seg_key][matching_index]
-                        elapsed = current_time - matching_train["depart_time"]
-                        if not (is_cross_harbor and elapsed < 120):
-                            segment_queues[seg_key].pop(matching_index)
-
+    # ----------------------------------------------------
     # 4. 队列垃圾清理 (10分钟超时)
+    # ----------------------------------------------------
     for seg_key in list(segment_queues.keys()):
         segment_queues[seg_key] = [t for t in segment_queues[seg_key] if current_time - t["depart_time"] < 600]
         if not segment_queues[seg_key]:
             del segment_queues[seg_key]
 
-    # 5. 【诊断检测】仅当 DEBUG=True 时才检测并写 debug.txt
+    # ----------------------------------------------------
+    # 5. 【保留诊断检测】仅当 DEBUG=True 时检测并写入 debug.txt
+    # ----------------------------------------------------
     conflict_details = []
     if DEBUG:
         for i, sta_code in enumerate(twl_stations):
@@ -312,7 +332,7 @@ def calc_twl_state(trains_data):
 
 def draw_twl_trains(state_data):
     """
-    第二部分：纯渲染逻辑（仅展示真正的站轨冲突 Bug，不打印普通在途列车残留）
+    第二部分：纯渲染逻辑（保留区间车绿轨判定与站轨冲突报警）
     """
     if not state_data:
         return
